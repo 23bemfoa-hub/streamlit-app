@@ -35,25 +35,22 @@ if st.session_state.logged_in_user is None:
         
         if st.button("Register Account"):
             if reg_school and reg_username and reg_name and uploaded_photo:
-                # Check database if user exists
                 existing = supabase.table("teachers").select("username").eq("username", reg_username).execute()
                 if existing.data:
                     st.error("This Username is already registered on the network.")
                 else:
-                    # Convert image to Base64 so it securely syncs across all devices globally
                     img = Image.open(uploaded_photo)
-                    img.thumbnail((300, 300)) # Compress slightly for fast network loading
+                    img.thumbnail((300, 300))
                     buffered = BytesIO()
                     img.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
                     
-                    # Insert record into central cloud database
                     supabase.table("teachers").insert({
                         "username": reg_username,
                         "name": reg_name,
                         "role": reg_title,
                         "school": reg_school,
-                        "photo_url": img_str # Safe device-to-device image string
+                        "photo_url": img_str
                     }).execute()
                     
                     st.success(f"Staff account created centrally! Log in using: **{reg_username}**")
@@ -79,18 +76,11 @@ else:
     my_school = teacher_info["school"]
     is_slt = "SLT" in teacher_info["role"] or "Headteacher" in teacher_info["role"]
     
-    # Initialize school alert queue if empty
-    try:
-        supabase.table("slt_alerts").select("id").limit(1).execute()
-    except Exception:
-        pass # Handled by table existence
-
     # Sidebar Badge Display
     with st.sidebar:
         st.subheader("🪪 School ID Badge")
         if teacher_info.get("photo_url"):
             try:
-                # Render central base64 image onto the badge natively
                 img_data = base64.b64decode(teacher_info["photo_url"])
                 st.image(img_data, width=150)
             except Exception:
@@ -126,20 +116,20 @@ else:
     my_classes = [c for c in classes_query.data if current_user in c["teachers"]]
 
     tab_classes, tab_register, tab_sanctions, tab_callout = st.tabs([
-        "🏫 Class Setup", 
+        "🏫 Class Setup & Management", 
         "📝 Class Registers & Attendance", 
         "⚖️ Merits & Sanctions",
         "🚨 Emergency SLT Callout"
     ])
 
-    # TAB 1: CLASS CONFIGURATION
+    # TAB 1: CLASS CONFIGURATION & EDITING
     with tab_classes:
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Set Up a New Class/Form")
             with st.form("create_class_form", clear_on_submit=True):
                 new_class_name = st.text_input("Class Name (e.g., 9B/Ma1)")
-                year_group = st.selectbox("Year Group", [f"Year {i}" for i in range(1, 14)] + ["Reception"])
+                year_group = st.selectbox("Year Group", [f"Year {i}" for i in range(1, 14)] + ["Reception"], key="create_yg")
                 create_btn = st.form_submit_button("Create Class")
                 
                 if create_btn and new_class_name:
@@ -176,9 +166,51 @@ else:
                         st.error("Roster Code not found.")
 
         st.divider()
-        st.subheader("Your Active Classes")
-        for c in my_classes:
-            st.markdown(f"- **{c['year_group']} - {c['class_name']}** (Code Shared: `{c['class_code']}` | Pupils: {len(c['students'])})")
+        
+        # --- NEW: EDIT & MANAGE SECTION ---
+        st.subheader("🛠️ Modify Existing Classes & Roster Lists")
+        if not my_classes:
+            st.info("No active classes linked to your profile to modify.")
+        else:
+            class_mod_options = {c["class_code"]: f"{c['year_group']} - {c['class_name']}" for c in my_classes}
+            mod_code = st.selectbox("Select Class to Edit or Clean", list(class_mod_options.keys()), format_func=lambda x: class_mod_options[x], key="mod_select")
+            
+            # Fetch fresh object data for modifying
+            mod_class_obj = supabase.table("classes").select("*").eq("class_code", mod_code).execute().data[0]
+            
+            c_edit_col, r_edit_col = st.columns(2)
+            
+            with c_edit_col:
+                st.markdown("**Update Class Details**")
+                with st.form(f"edit_details_form_{mod_code}"):
+                    current_years = [f"Year {i}" for i in range(1, 14)] + ["Reception"]
+                    yg_index = current_years.index(mod_class_obj["year_group"]) if mod_class_obj["year_group"] in current_years else 0
+                    
+                    edit_name = st.text_input("Edit Class Name", value=mod_class_obj["class_name"])
+                    edit_yg = st.selectbox("Change Year Group", current_years, index=yg_index)
+                    save_details_btn = st.form_submit_button("Save Details to Cloud")
+                    
+                    if save_details_btn:
+                        supabase.table("classes").update({
+                            "class_name": edit_name,
+                            "year_group": edit_yg
+                        }).eq("class_code", mod_code).execute()
+                        st.success("Class meta configuration updated!")
+                        st.rerun()
+            
+            with r_edit_col:
+                st.markdown("**Remove Pupils From Roster**")
+                mod_pupils = mod_class_obj["students"]
+                if not mod_pupils:
+                    st.caption("No pupils on roll to remove.")
+                else:
+                    pupil_to_remove = st.selectbox("Select pupil to delete from class", [p["name"] for p in mod_pupils])
+                    if st.button("❌ Remove Pupil Permanently", type="secondary"):
+                        # Rebuild student array without the selected pupil
+                        updated_pupils = [p for p in mod_pupils if p["name"] != pupil_to_remove]
+                        supabase.table("classes").update({"students": updated_pupils}).eq("class_code", mod_code).execute()
+                        st.error(f"Removed {pupil_to_remove} from roll.")
+                        st.rerun()
 
     # TAB 2: BULK REGISTERS & ATTENDANCE 
     with tab_register:
@@ -189,7 +221,6 @@ else:
             class_options = {c["class_code"]: f"{c['year_group']} - {c['class_name']}" for c in my_classes}
             selected_code = st.selectbox("Select Class to Register", list(class_options.keys()), format_func=lambda x: class_options[x], key="reg_select")
             
-            # Fetch fresh row status from DB
             selected_class = supabase.table("classes").select("*").eq("class_code", selected_code).execute().data[0]
             pupils = selected_class["students"]
             
