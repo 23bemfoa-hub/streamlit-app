@@ -1,25 +1,17 @@
 import streamlit as st
-import os
 import random
 import string
+import base64
 from PIL import Image
+from io import BytesIO
 from datetime import datetime
 from supabase import create_client, Client
 
-# --- DB CONNECTION CONFIGURATION ---
-SUPABASE_URL = "YOUR_SUPABASE_URL"
-SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY"
-
-# Fallback gracefully if keys are not configured yet
-if SUPABASE_URL == "YOUR_SUPABASE_URL" or SUPABASE_ANON_KEY == "YOUR_SUPABASE_ANON_KEY":
-    st.error("⚠️ Setup Required: Please input your real Supabase URL and Anon Key on lines 11 and 12 of the code.")
-    st.stop()
+# --- CONNECTED TO YOUR LIVE DATABASE ---
+SUPABASE_URL = "https://mqowcdlsrclpkxmognqg.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1xb3djZGxzcmNscGt4bW9nbnFnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1NTExNDYsImV4cCI6MjA5NTEyNzE0Nn0.kZPIPosl2Ko_Bjymbs6VTFr7j67DNYyUKfrGNrx8luc"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-
-UPLOAD_DIR = "teacher_photos"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
 
 def generate_class_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -29,7 +21,7 @@ if "logged_in_user" not in st.session_state:
 
 st.title("🇬🇧 UK School Behavior, Attendance & Live SLT Hub")
 
-# --- AUTHENTICATION (PASSWORDLESS VIA SUPABASE) ---
+# --- AUTHENTICATION (PASSWORDLESS VIA CENTRAL DB) ---
 if st.session_state.logged_in_user is None:
     tab1, tab2 = st.tabs(["🔒 Staff Sign In (ID Only)", "📝 Create Staff Account"])
     
@@ -48,17 +40,20 @@ if st.session_state.logged_in_user is None:
                 if existing.data:
                     st.error("This Username is already registered on the network.")
                 else:
-                    photo_path = os.path.join(UPLOAD_DIR, f"{reg_username}.png")
+                    # Convert image to Base64 so it securely syncs across all devices globally
                     img = Image.open(uploaded_photo)
-                    img.save(photo_path)
+                    img.thumbnail((300, 300)) # Compress slightly for fast network loading
+                    buffered = BytesIO()
+                    img.save(buffered, format="PNG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
                     
-                    # Insert record into live cloud database
+                    # Insert record into central cloud database
                     supabase.table("teachers").insert({
                         "username": reg_username,
                         "name": reg_name,
                         "role": reg_title,
                         "school": reg_school,
-                        "photo_url": photo_path # Local mirror path or cloud pointer
+                        "photo_url": img_str # Safe device-to-device image string
                     }).execute()
                     
                     st.success(f"Staff account created centrally! Log in using: **{reg_username}**")
@@ -84,11 +79,22 @@ else:
     my_school = teacher_info["school"]
     is_slt = "SLT" in teacher_info["role"] or "Headteacher" in teacher_info["role"]
     
+    # Initialize school alert queue if empty
+    try:
+        supabase.table("slt_alerts").select("id").limit(1).execute()
+    except Exception:
+        pass # Handled by table existence
+
     # Sidebar Badge Display
     with st.sidebar:
         st.subheader("🪪 School ID Badge")
-        if os.path.exists(teacher_info["photo_url"]):
-            st.image(teacher_info["photo_url"], width=150)
+        if teacher_info.get("photo_url"):
+            try:
+                # Render central base64 image onto the badge natively
+                img_data = base64.b64decode(teacher_info["photo_url"])
+                st.image(img_data, width=150)
+            except Exception:
+                st.caption("📷 Image format error")
         st.markdown(f"### **{teacher_info['name']}**")
         st.markdown(f"*{teacher_info['role']}*")
         st.caption(f"🏫 {my_school}")
@@ -203,6 +209,7 @@ else:
                 st.info("No pupils on roll for this selection.")
             else:
                 st.write("#### Attendance Configuration Grid")
+                st.caption("Changes are synced immediately to the database network.")
                 changed = False
                 for idx, p in enumerate(pupils):
                     c1, c2 = st.columns([2, 2])
