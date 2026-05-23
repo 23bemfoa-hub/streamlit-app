@@ -4,70 +4,64 @@ import random
 import string
 from PIL import Image
 from datetime import datetime
+from supabase import create_client, Client
 
-# Setup local storage directory for Teacher ID photos
+# --- DB CONNECTION CONFIGURATION ---
+SUPABASE_URL = "YOUR_SUPABASE_URL"
+SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY"
+
+# Fallback gracefully if keys are not configured yet
+if SUPABASE_URL == "YOUR_SUPABASE_URL" or SUPABASE_ANON_KEY == "YOUR_SUPABASE_ANON_KEY":
+    st.error("⚠️ Setup Required: Please input your real Supabase URL and Anon Key on lines 11 and 12 of the code.")
+    st.stop()
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
 UPLOAD_DIR = "teacher_photos"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
-# Generate a unique 6-character Class Code for co-teachers
 def generate_class_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-
-# --- GLOBAL DATA STRUCTURES (Simulating a Shared Network Database) ---
-if "teachers_db" not in st.session_state:
-    st.session_state.teachers_db = {}  # {username: {name, role, school, photo_path}}
-
-if "classes_db" not in st.session_state:
-    st.session_state.classes_db = {
-        "Y6MATH": {
-            "class_name": "Set 1 Mathematics",
-            "year_group": "Year 6",
-            "teachers": [],
-            "students": [
-                {"name": "Oliver Smith", "points": 0, "sanctions": [], "attendance": "Not Marked"},
-                {"name": "Amelie Jones", "points": 3, "sanctions": [], "attendance": "Not Marked"}
-            ]
-        }
-    }
-
-# Live Global Alert System { school_name: [ {teacher, room, reason, time, status} ] }
-if "slt_alerts" not in st.session_state:
-    st.session_state.slt_alerts = {}
 
 if "logged_in_user" not in st.session_state:
     st.session_state.logged_in_user = None
 
 st.title("🇬🇧 UK School Behavior, Attendance & Live SLT Hub")
 
-# --- AUTHENTICATION ROUTING (PASSWORDLESS) ---
+# --- AUTHENTICATION (PASSWORDLESS VIA SUPABASE) ---
 if st.session_state.logged_in_user is None:
     tab1, tab2 = st.tabs(["🔒 Staff Sign In (ID Only)", "📝 Create Staff Account"])
     
     with tab2:
         st.subheader("Register New Staff Member")
-        reg_school = st.text_input("School Name (Must match your colleagues exactly, e.g., Oakwood Academy)").strip()
-        reg_username = st.text_input("Choose a Unique Staff Username (e.g., jsmith1)", key="reg_user").strip().lower()
+        reg_school = st.text_input("School Name (e.g., Oakwood Academy)").strip()
+        reg_username = st.text_input("Choose a Unique Staff Username", key="reg_user").strip().lower()
         reg_name = st.text_input("Full Name (e.g., Mr J. Smith / Miss A. Patel)", key="reg_name")
         reg_title = st.selectbox("Role / Job Title", ["Form Tutor", "Subject Teacher", "Head of Year", "Headteacher / SLT", "Deputy Head / SLT", "Teaching Assistant"])
         uploaded_photo = st.file_uploader("Upload Profile Photo for Staff ID Badge", type=["jpg", "jpeg", "png"])
         
         if st.button("Register Account"):
             if reg_school and reg_username and reg_name and uploaded_photo:
-                if reg_username in st.session_state.teachers_db:
-                    st.error("This Username is already registered.")
+                # Check database if user exists
+                existing = supabase.table("teachers").select("username").eq("username", reg_username).execute()
+                if existing.data:
+                    st.error("This Username is already registered on the network.")
                 else:
                     photo_path = os.path.join(UPLOAD_DIR, f"{reg_username}.png")
                     img = Image.open(uploaded_photo)
                     img.save(photo_path)
                     
-                    st.session_state.teachers_db[reg_username] = {
+                    # Insert record into live cloud database
+                    supabase.table("teachers").insert({
+                        "username": reg_username,
                         "name": reg_name,
                         "role": reg_title,
                         "school": reg_school,
-                        "photo_path": photo_path
-                    }
-                    st.success(f"Staff account created for {reg_school}! Log in using: **{reg_username}**")
+                        "photo_url": photo_path # Local mirror path or cloud pointer
+                    }).execute()
+                    
+                    st.success(f"Staff account created centrally! Log in using: **{reg_username}**")
             else:
                 st.warning("Please complete all sections and upload a photo.")
 
@@ -76,60 +70,54 @@ if st.session_state.logged_in_user is None:
         login_username = st.text_input("Staff Username", key="log_user").strip().lower()
         
         if st.button("Sign In"):
-            if login_username in st.session_state.teachers_db:
-                st.session_state.logged_in_user = login_username
+            user_query = supabase.table("teachers").select("*").eq("username", login_username).execute()
+            if user_query.data:
+                st.session_state.logged_in_user = user_query.data[0]
                 st.rerun()
             else:
-                st.error("Staff Username not found. Please verify spelling or create an account.")
+                st.error("Staff Username not found on the database network.")
 
-# --- MAIN APP INTERFACE (LOGGED IN) ---
+# --- MAIN APP INTERFACE (LOGGED IN TO GLOBAL DB) ---
 else:
-    current_user = st.session_state.logged_in_user
-    teacher_info = st.session_state.teachers_db[current_user]
+    teacher_info = st.session_state.logged_in_user
+    current_user = teacher_info["username"]
     my_school = teacher_info["school"]
     is_slt = "SLT" in teacher_info["role"] or "Headteacher" in teacher_info["role"]
     
-    # Initialize school alert queue if empty
-    if my_school not in st.session_state.slt_alerts:
-        st.session_state.slt_alerts[my_school] = []
-
-    # Sidebar: UK Staff ID Badge
+    # Sidebar Badge Display
     with st.sidebar:
         st.subheader("🪪 School ID Badge")
-        if os.path.exists(teacher_info["photo_path"]):
-            st.image(teacher_info["photo_path"], width=150)
+        if os.path.exists(teacher_info["photo_url"]):
+            st.image(teacher_info["photo_url"], width=150)
         st.markdown(f"### **{teacher_info['name']}**")
         st.markdown(f"*{teacher_info['role']}*")
         st.caption(f"🏫 {my_school}")
-        st.caption(f"Staff Ref: {current_user}")
         
         st.divider()
         if st.button("🚪 Log Out"):
             st.session_state.logged_in_user = None
             st.rerun()
 
-    # --- 🚨 LIVE SLT CALLOUT PANEL (BANNER SYSTEM) ---
-    active_school_alerts = [a for a in st.session_state.slt_alerts[my_school] if a["status"] == "⚠️ Active"]
+    # --- REALTIME SLT ALERTS NETWORK QUERY ---
+    alerts_query = supabase.table("slt_alerts").select("*").eq("school", my_school).eq("status", "⚠️ Active").execute()
+    active_school_alerts = alerts_query.data
     
     if active_school_alerts:
         if is_slt:
             st.error(f"🚨 **CRITICAL ALERT: {len(active_school_alerts)} Active SLT Callout(s) Requested!**")
-            for idx, alert in enumerate(active_school_alerts):
+            for alert in active_school_alerts:
                 with st.expander(f"🔴 CALLOUT: Room {alert['room']} ({alert['time']})", expanded=True):
                     st.write(f"**Staff Member:** {alert['sender']}")
-                    st.write(f"**Situation/Reason:** {alert['reason']}")
-                    if st.button("✅ Accept & Clear Callout", key=f"clear_{idx}"):
-                        alert["status"] = "Resolved"
-                        st.success("Callout cleared.")
+                    st.write(f"**Situation:** {alert['reason']}")
+                    if st.button("✅ Clear Callout", key=f"clear_{alert['id']}"):
+                        supabase.table("slt_alerts").update({"status": "Resolved"}).eq("id", alert["id"]).execute()
                         st.rerun()
         else:
-            st.warning(f"⚠️ An SLT callout is currently active in your school building (Room {active_school_alerts[0]['room']}).")
+            st.warning(f"⚠️ Active emergency SLT assistance has been requested to Room {active_school_alerts[0]['room']}.")
 
-    # Get classes linked to this teacher
-    my_classes = {
-        ccode: cdata for ccode, cdata in st.session_state.classes_db.items() 
-        if current_user in cdata["teachers"]
-    }
+    # Fetch all classes belonging to this specific school where current user is listed as a teacher
+    classes_query = supabase.table("classes").select("*").eq("school", my_school).execute()
+    my_classes = [c for c in classes_query.data if current_user in c["teachers"]]
 
     tab_classes, tab_register, tab_sanctions, tab_callout = st.tabs([
         "🏫 Class Setup", 
@@ -138,149 +126,153 @@ else:
         "🚨 Emergency SLT Callout"
     ])
 
-    # TAB 1: UK CLASS MANAGEMENT & JOINT TEACHING
+    # TAB 1: CLASS CONFIGURATION
     with tab_classes:
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Set Up a New Class/Form")
             with st.form("create_class_form", clear_on_submit=True):
-                new_class_name = st.text_input("Class Name (e.g., 9B/Ma1, Red House Form)")
+                new_class_name = st.text_input("Class Name (e.g., 9B/Ma1)")
                 year_group = st.selectbox("Year Group", [f"Year {i}" for i in range(1, 14)] + ["Reception"])
                 create_btn = st.form_submit_button("Create Class")
                 
                 if create_btn and new_class_name:
                     code = generate_class_code()
-                    st.session_state.classes_db[code] = {
+                    supabase.table("classes").insert({
+                        "class_code": code,
                         "class_name": new_class_name,
                         "year_group": year_group,
+                        "school": my_school,
                         "teachers": [current_user],
                         "students": []
-                    }
-                    st.success(f"Class created! Share this Code with Subject Teachers: **{code}**")
+                    }).execute()
+                    st.success(f"Class saved globally! Roster Code: **{code}**")
                     st.rerun()
         
         with col2:
-            st.subheader("Join Class as a Subject Teacher")
+            st.subheader("Link to Existing Class Code")
             with st.form("join_class_form", clear_on_submit=True):
                 join_code = st.text_input("Class Code").upper().strip()
-                join_btn = st.form_submit_button("Link to Class")
+                join_btn = st.form_submit_button("Link To Class")
                 
                 if join_btn and join_code:
-                    if join_code in st.session_state.classes_db:
-                        if current_user in st.session_state.classes_db[join_code]["teachers"]:
-                            st.warning("You are already linked to this class roster.")
-                        else:
-                            st.session_state.classes_db[join_code]["teachers"].append(current_user)
-                            st.success(f"Linked successfully to {st.session_state.classes_db[join_code]['class_name']}!")
+                    class_data = supabase.table("classes").select("*").eq("class_code", join_code).execute()
+                    if class_data.data:
+                        target = class_data.data[0]
+                        if current_user not in target["teachers"]:
+                            updated_teachers = target["teachers"] + [current_user]
+                            supabase.table("classes").update({"teachers": updated_teachers}).eq("class_code", join_code).execute()
+                            st.success("Successfully linked as co-teacher!")
                             st.rerun()
+                        else:
+                            st.warning("You are already linked to this class setup.")
                     else:
-                        st.error("Invalid Class Code.")
+                        st.error("Roster Code not found.")
 
         st.divider()
-        st.subheader("Your Assigned Classes")
-        if not my_classes:
-            st.info("You are not assigned to any classes yet.")
-        else:
-            for ccode, cdata in my_classes.items():
-                with st.expander(f"📚 {cdata['year_group']} - {cdata['class_name']} (Code: {ccode})"):
-                    st.write(f"**Pupils on Roll:** {len(cdata['students'])}")
+        st.subheader("Your Active Classes")
+        for c in my_classes:
+            st.markdown(f"- **{c['year_group']} - {c['class_name']}** (Code Shared: `{c['class_code']}` | Pupils: {len(c['students'])})")
 
-    # TAB 2: REGISTER & ATTENDANCE SYSTEM
+    # TAB 2: BULK REGISTERS & ATTENDANCE 
     with tab_register:
-        st.subheader("Take Class Register")
+        st.subheader("Class Registers")
         if not my_classes:
-            st.warning("Please set up or link to a class before checking attendance.")
+            st.info("No active classes linked to your profile.")
         else:
-            class_options = {ccode: f"{cdata['year_group']} - {cdata['class_name']}" for ccode, cdata in my_classes.items()}
-            selected_code = st.selectbox("Select Class to Register", list(class_options.keys()), format_func=lambda x: class_options[x], key="reg_class_select")
+            class_options = {c["class_code"]: f"{c['year_group']} - {c['class_name']}" for c in my_classes}
+            selected_code = st.selectbox("Select Class to Register", list(class_options.keys()), format_func=lambda x: class_options[x], key="reg_select")
             
-            # Form to bulk add pupils
-            with st.expander("📥 Bulk Import Roster From List"):
-                with st.form("bulk_pupil_form", clear_on_submit=True):
-                    raw_paste_data = st.text_area("Paste pupil names here (one per line)...", height=100)
-                    bulk_import_btn = st.form_submit_button("Extract and Add Pupils")
-                    if bulk_import_btn and raw_paste_data:
-                        for line in raw_paste_data.split("\n"):
+            # Fetch fresh row status from DB
+            selected_class = supabase.table("classes").select("*").eq("class_code", selected_code).execute().data[0]
+            pupils = selected_class["students"]
+            
+            with st.expander("📥 Bulk Paste New Pupils to Roll"):
+                with st.form("bulk_add", clear_on_submit=True):
+                    raw_names = st.text_area("Paste name listing (One per line)")
+                    add_btn = st.form_submit_button("Import")
+                    if add_btn and raw_names:
+                        for line in raw_names.split("\n"):
                             if line.strip():
-                                st.session_state.classes_db[selected_code]["students"].append({
-                                    "name": line.strip(), "points": 0, "sanctions": [], "attendance": "Not Marked"
-                                })
-                        st.success("Pupils extracted!")
+                                pupils.append({"name": line.strip(), "points": 0, "sanctions": [], "attendance": "Present ( / )"})
+                        supabase.table("classes").update({"students": pupils}).eq("class_code", selected_code).execute()
+                        st.success("Roster expanded!")
                         st.rerun()
 
-            # Main Register Interface
-            pupils = st.session_state.classes_db[selected_code]["students"]
             if not pupils:
-                st.info("No pupils registered in this class yet.")
+                st.info("No pupils on roll for this selection.")
             else:
-                st.write("#### Live Attendance Grid")
-                st.caption("Select the status for each student on roll:")
-                
-                # Update status interactively
+                st.write("#### Attendance Configuration Grid")
+                changed = False
                 for idx, p in enumerate(pupils):
-                    col_name, col_status = st.columns([2, 2])
-                    with col_name:
-                        st.write(f"**{p['name']}**")
-                    with col_status:
-                        # UK Standard codes: Present (/), Absent (N), Late (L), Medical (M)
-                        current_idx = ["Present ( / )", "Absent ( N )", "Late ( L )", "Medical ( M )"].index(
-                            f"{p['attendance']}" if p['attendance'] in ["Present ( / )", "Absent ( N )", "Late ( L )", "Medical ( M )"] else "Present ( / )"
-                        )
-                        status = col_status.selectbox(f"Status for {p['name']}", ["Present ( / )", "Absent ( N )", "Late ( L )", "Medical ( M )"], index=current_idx, label_visibility="collapsed", key=f"att_{idx}")
+                    c1, c2 = st.columns([2, 2])
+                    c1.write(f"**{p['name']}**")
+                    possible_marks = ["Present ( / )", "Absent ( N )", "Late ( L )", "Medical ( M )"]
+                    cur_att = p.get("attendance", "Present ( / )")
+                    att_idx = possible_marks.index(cur_att) if cur_att in possible_marks else 0
+                    
+                    status = c2.selectbox(f"Mark {p['name']}", possible_marks, index=att_idx, key=f"p_att_{idx}", label_visibility="collapsed")
+                    if status != cur_att:
                         p["attendance"] = status
+                        changed = True
+                
+                if changed:
+                    supabase.table("classes").update({"students": pupils}).eq("class_code", selected_code).execute()
+                    st.toast("Attendance synchronization updated live!", icon="💾")
 
-                st.success("Register configurations automatically saved in session memory!")
-
-    # TAB 3: UK SANCTIONS & MERITS
+    # TAB 3: MERITS & SANCTIONS MATRIX
     with tab_sanctions:
-        st.subheader("Log Behavior Incidents & Rewards")
+        st.subheader("Log Actions")
         if not my_classes:
-            st.warning("You must be linked to a class to issue points.")
+            st.info("Create or join a class to manage metrics.")
         else:
-            class_options = {ccode: f"{cdata['year_group']} - {cdata['class_name']}" for ccode, cdata in my_classes.items()}
-            s_code = st.selectbox("Select Class", list(class_options.keys()), format_func=lambda x: class_options[x], key="sanc_class_select")
+            class_options = {c["class_code"]: f"{c['year_group']} - {c['class_name']}" for c in my_classes}
+            s_code = st.selectbox("Select Target Class", list(class_options.keys()), format_func=lambda x: class_options[x])
             
-            pupil_list = st.session_state.classes_db[s_code]["students"]
-            if not pupil_list:
-                st.info("No pupils registered in this class.")
+            selected_class = supabase.table("classes").select("*").eq("class_code", s_code).execute().data[0]
+            pupils = selected_class["students"]
+            
+            if not pupils:
+                st.info("Roster empty.")
             else:
-                pupil_names = [p["name"] for p in pupil_list]
-                selected_pupil_name = st.selectbox("Select Pupil", pupil_names)
-                pupil = pupil_list[pupil_names.index(selected_pupil_name)]
+                p_names = [p["name"] for p in pupils]
+                selected_p = st.selectbox("Select Pupil", p_names)
+                p_idx = p_names.index(selected_p)
+                pupil = pupils[p_idx]
                 
-                category = st.selectbox("Action Category", ["🌟 Positive: Merit / House Point", "🌟 Positive: Headteacher's Award", "⚠️ Sanction: C1 (First Warning)", "⚠️ Sanction: C2 (Break/Lunch Detention)", "⚠️ Sanction: C3 (After-School Detention / SLT Escalation)"])
-                reason = st.text_input("Details / Reason")
+                category = st.selectbox("Action Tiers", ["🌟 Positive: Merit / House Point", "🌟 Positive: Headteacher's Award", "⚠️ Sanction: C1 (First Warning)", "⚠️ Sanction: C2 (Break/Lunch Detention)", "⚠️ Sanction: C3 (After-School Detention / SLT Escalation)"])
+                reason = st.text_input("Incident / Commendation Entry Details")
                 
-                if st.button("Log to Behavior Record"):
+                if st.button("Publish Log to Cloud Record"):
                     if reason:
                         val = 1 if "Merit" in category else (3 if "Headteacher" in category else (0 if "C1" in category else (-1 if "C2" in category else -3)))
-                        pupil["points"] += val
+                        pupil["points"] = pupil.get("points", 0) + val
+                        if "sanctions" not in pupil: pupil["sanctions"] = []
                         pupil["sanctions"].append(f"{category}: {reason} ({'+' if val>=0 else ''}{val} pts) — By {teacher_info['name']}")
-                        st.success("Record updated!")
-                    else:
-                        st.error("Please insert a description.")
+                        
+                        supabase.table("classes").update({"students": pupils}).eq("class_code", s_code).execute()
+                        st.success("Central records successfully updated!")
+                        st.rerun()
+                
+                st.divider()
+                st.subheader("Historical Log Listing")
+                for log in reversed(pupil.get("sanctions", [])):
+                    st.caption(log)
 
-    # TAB 4: 🚨 LIVE SLT EMERGENCY CALLOUT
+    # TAB 4: 🚨 LIVE REALTIME CALLOUT ENGINE
     with tab_callout:
-        st.subheader("🚨 Request Direct SLT Intervention")
-        st.write("Use this *only* if immediate assistance is required in your classroom for safety or severe behavioral crises.")
-        
-        with st.form("slt_callout_form", clear_on_submit=True):
-            room_number = st.text_input("Your Current Room Number / Location (e.g., Room 14 / Science Lab 2)")
-            incident_details = st.text_area("Brief nature of crisis (e.g., Severe safety risk, Refusal to leave room on C3 exit)")
-            submit_callout = st.form_submit_button("🔴 TRIGGER EMERGENCY SLT CALLOUT")
+        st.subheader("🚨 Trigger Live School SLT Emergency Intervention")
+        with st.form("emergency_dispatch", clear_on_submit=True):
+            room = st.text_input("Target Classroom / Room Identifier (e.g., Block B - Room 102)")
+            details = st.text_area("Critical Incident Description")
+            dispatch_btn = st.form_submit_button("🔴 SEND CENTRAL SLT DISPATCH ALERT")
             
-            if submit_callout:
-                if room_number and incident_details:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    new_alert = {
-                        "sender": f"{teacher_info['name']} ({teacher_info['role']})",
-                        "room": room_number,
-                        "reason": incident_details,
-                        "time": timestamp,
-                        "status": "⚠️ Active"
-                    }
-                    st.session_state.slt_alerts[my_school].append(new_alert)
-                    st.error(f"Emergency callout issued at {timestamp}. All SLT members at {my_school} have been alerted.")
-                else:
-                    st.warning("Please specify your location and reason for callout.")
+            if dispatch_btn and room and details:
+                supabase.table("slt_alerts").insert({
+                    "school": my_school,
+                    "sender": f"{teacher_info['name']} ({teacher_info['role']})",
+                    "room": room,
+                    "reason": details,
+                    "time": datetime.now().strftime("%H:%M:%S")
+                }).execute()
+                st.error("Central Alert Broadcasted! Every active SLT dashboard viewport in your school is now pinging.")
